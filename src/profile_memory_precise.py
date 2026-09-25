@@ -1,44 +1,51 @@
+import os
 import tracemalloc
-import time
 import numpy as np
 import onnxruntime as ort
 
+def get_proc_rss_mib():
+    """Reads Linux kernel VmRSS from /proc/self/status for native C++ memory."""
+    try:
+        with open('/proc/self/status', 'r') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) / 1024.0  # KiB to MiB
+    except Exception:
+        pass
+    return 0.0
+
 def profile_precise_memory():
     print("=" * 65)
-    print("QADR Fix 2: Precise Memory Allocation Profiling (tracemalloc)")
+    print("QADR Memory Profiling: Native Kernel VmRSS + Python tracemalloc")
     print("=" * 65)
     
-    tracemalloc.start()
-    
     # 1. Base Python Interpreter Memory
-    current, peak = tracemalloc.get_traced_memory()
-    base_mem_mb = peak / (1024 * 1024)
+    base_rss = get_proc_rss_mib()
     
-    # 2. Session Load FP32 Memory
-    tracemalloc.reset_peak()
+    # 2. FP32 Model C++ Session Allocation
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = 2
     session_fp32 = ort.InferenceSession("models/mobilenetv4_small_fp32.onnx", opts)
-    current, peak = tracemalloc.get_traced_memory()
-    fp32_mem_mb = peak / (1024 * 1024)
+    fp32_rss = get_proc_rss_mib()
+    fp32_allocated = fp32_rss - base_rss
     
-    # 3. Session Load INT8 Memory
-    tracemalloc.reset_peak()
+    # 3. INT8 Model C++ Session Allocation
     session_int8 = ort.InferenceSession("models/mobilenetv4_small_int8.onnx", opts)
-    current, peak = tracemalloc.get_traced_memory()
-    int8_mem_mb = peak / (1024 * 1024)
+    int8_rss = get_proc_rss_mib()
+    int8_allocated = int8_rss - fp32_rss
     
-    # 4. QADR Pre-Op Working Set Memory
-    tracemalloc.reset_peak()
+    # 4. QADR Pre-Op Working Set Memory (NumPy array allocation)
+    tracemalloc.start()
     dummy_input = np.random.randn(1, 3, 224, 224).astype(np.float32)
     _ = np.clip(dummy_input * 1.0376 + 0.0002, 0.0002, 0.9034)
-    current, peak = tracemalloc.get_traced_memory()
-    qadr_mem_kb = peak / 1024.0
+    _, peak_bytes = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    qadr_working_set_kb = peak_bytes / 1024.0
     
-    print(f"Base Python Interpreter Memory : {base_mem_mb:.2f} MiB")
-    print(f"FP32 Model Allocated Memory    : {fp32_mem_mb:.2f} MiB")
-    print(f"INT8 Model Allocated Memory    : {int8_mem_mb:.2f} MiB")
-    print(f"QADR Pre-Op Working Set Peak   : {qadr_mem_kb:.2f} KiB ({qadr_mem_kb/1024.0:.4f} MiB)")
+    print(f"Base Interpreter Memory        : {base_rss:.2f} MiB")
+    print(f"FP32 Model Native Allocation   : {fp32_allocated:.2f} MiB")
+    print(f"INT8 Model Native Allocation   : {int8_allocated:.2f} MiB")
+    print(f"QADR Pre-Op Working Set Peak   : {qadr_working_set_kb:.2f} KiB ({qadr_working_set_kb/1024.0:.4f} MiB)")
     print("=" * 65)
 
 if __name__ == "__main__":
