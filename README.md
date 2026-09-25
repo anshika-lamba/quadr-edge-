@@ -1,0 +1,1 @@
+# QADR Edge Research
